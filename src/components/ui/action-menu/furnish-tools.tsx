@@ -1,102 +1,65 @@
 'use client'
 
-import NextImage from 'next/image'
-import { cn } from './../../../lib/utils'
-import useEditor, { type CatalogCategory } from './../../../store/use-editor'
-import { ActionButton } from './action-button'
+import { useViewer } from '@pascal-app/viewer'
+import useEditor from '../../../store/use-editor'
+import { useCatalog } from '../../../store/use-catalog'
+import Image from 'next/image'
 
-export type FurnishToolConfig = {
-  id: 'item'
-  iconSrc: string
-  label: string
-  catalogCategory: CatalogCategory
-}
-
-// Furnish mode tools: furniture, appliances, decoration (painting is now a control mode)
-export const furnishTools: FurnishToolConfig[] = [
-  {
-    id: 'item',
-    iconSrc: '/icons/couch.png',
-    label: 'Furniture',
-    catalogCategory: 'furniture',
-  },
-  {
-    id: 'item',
-    iconSrc: '/icons/appliance.png',
-    label: 'Appliance',
-    catalogCategory: 'appliance',
-  },
-  {
-    id: 'item',
-    iconSrc: '/icons/kitchen.png',
-    label: 'Kitchen',
-    catalogCategory: 'kitchen',
-  },
-  {
-    id: 'item',
-    iconSrc: '/icons/bathroom.png',
-    label: 'Bathroom',
-    catalogCategory: 'bathroom',
-  },
-  {
-    id: 'item',
-    iconSrc: '/icons/tree.png',
-    label: 'Outdoor',
-    catalogCategory: 'outdoor',
-  },
+// 1. Your Custom 2D CAD Library
+export const furnishTools = [
+  // Example using downloaded images:
+  // { id: 'sofa', name: 'Modern Sofa', width: 2.2, depth: 0.9, imageSrc: '/assets/sofa-topdown.svg' },
+  // { id: 'bed', name: 'Queen Bed', width: 1.6, depth: 2.0, imageSrc: '/assets/bed-topdown.png' },
+  
+  // Fallbacks until you download your images:
+  { id: 'bed', name: 'Double Bed', width: 1.6, depth: 2.0, imageSrc: '/cad/bed.svg' },
+  { id: 'sofa', name: '3-Seater Sofa', width: 2.2, depth: 0.9, imageSrc: '/cad/sofa.svg' },
+  { id: 'table', name: 'Dining Table', width: 1.8, depth: 0.9, imageSrc: '/cad/table.svg' },
+  { id: 'toilet', name: 'Toilet', width: 0.5, depth: 0.7, imageSrc: '/cad/toilet.svg' },
+  // Keep fallbacks for items you haven't downloaded SVGs for yet
+  { id: 'desk', name: 'Office Desk', width: 1.4, depth: 0.7, icon: '💻' },
 ]
 
 export function FurnishTools() {
-  const mode = useEditor((state) => state.mode)
-  const activeTool = useEditor((state) => state.tool)
-  const setActiveTool = useEditor((state) => state.setTool)
-  const setMode = useEditor((state) => state.setMode)
-  const catalogCategory = useEditor((state) => state.catalogCategory)
-  const setCatalogCategory = useEditor((state) => state.setCatalogCategory)
+  const setTool = useEditor((s) => s.setTool)
+  const setActiveItem = useCatalog((s) => s.setActiveItem) // USING OUR NEW STORE
+  const selectedLevelId = useViewer((s) => s.selection.levelId)
 
-  const hasActiveTool = furnishTools.some(
-    (tool) => mode === 'build' && activeTool === 'item' && catalogCategory === tool.catalogCategory,
-  )
+  if (!selectedLevelId) return null
+
+  const handleSelect = (item: any) => {
+    setActiveItem(item) // Safely store the item
+    setTool('item')     // Trigger the placement tool
+  }
 
   return (
-    <div className="flex items-center gap-1.5 px-1">
-      {furnishTools.map((tool, index) => {
-        // For item tools with catalog category, check both tool and category match
-        const isActive =
-          mode === 'build' && activeTool === 'item' && catalogCategory === tool.catalogCategory
-
-        return (
-          <ActionButton
-            className={cn(
-              'rounded-lg duration-300',
-              isActive
-                ? 'z-10 scale-110 bg-black/40 hover:bg-black/40'
-                : 'scale-95 bg-transparent opacity-60 grayscale hover:bg-black/20 hover:opacity-100 hover:grayscale-0',
-            )}
-            key={`${tool.id}-${tool.catalogCategory ?? index}`}
-            label={tool.label}
-            onClick={() => {
-              if (!isActive) {
-                setCatalogCategory(tool.catalogCategory)
-                setActiveTool('item')
-                if (mode !== 'build') {
-                  setMode('build')
-                }
-              }
-            }}
-            size="icon"
-            variant="ghost"
-          >
-            <NextImage
-              alt={tool.label}
-              className="size-full object-contain"
-              height={28}
-              src={tool.iconSrc}
-              width={28}
-            />
-          </ActionButton>
-        )
-      })}
+    <div className="flex w-full flex-col px-3 py-2">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        2D CAD Blocks
+      </div>
+      
+      <div className="custom-scrollbar flex w-full overflow-x-auto pb-2">
+        <div className="flex w-max gap-2 pr-4">
+          {furnishTools.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => handleSelect(item)}
+              className="flex h-16 w-16 shrink-0 flex-col items-center justify-center rounded-lg border border-border/50 bg-[#2C2C2E] transition-colors hover:border-border hover:bg-[#3e3e3e]"
+              title={item.name}
+            >
+              {/* Render Image if exists, otherwise Emoji */}
+              {item.imageSrc ? (
+                <img src={item.imageSrc} alt={item.name} className="w-8 h-8 object-contain mb-1" />
+              ) : (
+                <span className="mb-1 text-2xl">{item.icon}</span>
+              )}
+              <span className="w-full truncate px-1 text-center text-[9px] font-medium text-muted-foreground">
+                {item.name}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }

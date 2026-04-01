@@ -23,6 +23,8 @@ import type { SitePanelProps } from '../ui/sidebar/panels/site-panel'
 import { FloorplanPanel } from './floorplan-panel'
 import { OpeningTool2D } from '../tools/opening-tool-2d'
 import { SelectionTool2D } from '../tools/selection-tool-2d'
+import { ItemTool2D } from '../tools/item-tool-2d'
+import { TextTool2D } from '../tools/text-tool-2d'
 import { MoveOpeningTool2D } from '../tools/move-opening-tool-2d'
 let hasInitializedEditorRuntime = false
 
@@ -133,6 +135,8 @@ export default function Editor({
             <OpeningTool2D /> 
             <SelectionTool2D />
             <MoveOpeningTool2D />
+            <ItemTool2D />
+            <TextTool2D />
           </main>
         </ErrorBoundary>
       </div>

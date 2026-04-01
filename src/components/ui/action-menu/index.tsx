@@ -6,11 +6,10 @@ import { useReducedMotion } from './../../../hooks/use-reduced-motion'
 import { cn } from './../../../lib/utils'
 import useEditor from './../../../store/use-editor'
 import { ItemCatalog } from '../item-catalog/item-catalog'
-import { CameraActions } from './camera-actions'
 import { ControlModes } from './control-modes'
 import { FurnishTools } from './furnish-tools'
 import { StructureTools } from './structure-tools'
-import { ViewToggles } from './view-toggles'
+
 
 export function ActionMenu({ className }: { className?: string }) {
   const phase = useEditor((state) => state.phase)
@@ -140,11 +139,8 @@ export function ActionMenu({ className }: { className?: string }) {
         </AnimatePresence>
         {/* Control Mode Row - Always visible, centered */}
         <div className="flex items-center justify-center gap-1 px-2 py-1.5">
+          {/* Only keep the Core Modes (Select, Build, Delete) */}
           <ControlModes />
-          <div className="mx-1 h-5 w-px bg-border" />
-          <ViewToggles />
-          <div className="mx-1 h-5 w-px bg-border" />
-          <CameraActions />
         </div>
       </motion.div>
     </TooltipProvider>
