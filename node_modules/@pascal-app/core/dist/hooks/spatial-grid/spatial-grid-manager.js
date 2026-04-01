@@ -1,0 +1,563 @@
+import { getScaledDimensions } from '../../schema';
+import { SpatialGrid } from './spatial-grid';
+import { WallSpatialGrid } from './wall-spatial-grid';
+// ============================================================================
+// GEOMETRY HELPERS
+// ============================================================================
+/**
+ * Point-in-polygon test using ray casting algorithm.
+ */
+export function pointInPolygon(px, pz, polygon) {
+    let inside = false;
+    const n = polygon.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+        const xi = polygon[i][0], zi = polygon[i][1];
+        const xj = polygon[j][0], zj = polygon[j][1];
+        if (zi > pz !== zj > pz && px < ((xj - xi) * (pz - zi)) / (zj - zi) + xi) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+/**
+ * Compute the 4 XZ footprint corners of an item given its position, dimensions, and Y rotation.
+ */
+function getItemFootprint(position, dimensions, rotation, inset = 0) {
+    const [x, , z] = position;
+    const [w, , d] = dimensions;
+    const yRot = rotation[1];
+    const halfW = Math.max(0, w / 2 - inset);
+    const halfD = Math.max(0, d / 2 - inset);
+    const cos = Math.cos(yRot);
+    const sin = Math.sin(yRot);
+    return [
+        [x + (-halfW * cos + halfD * sin), z + (-halfW * sin - halfD * cos)],
+        [x + (halfW * cos + halfD * sin), z + (halfW * sin - halfD * cos)],
+        [x + (halfW * cos - halfD * sin), z + (halfW * sin + halfD * cos)],
+        [x + (-halfW * cos - halfD * sin), z + (-halfW * sin + halfD * cos)],
+    ];
+}
+/**
+ * Test if two line segments (a1->a2) and (b1->b2) intersect.
+ */
+function segmentsIntersect(ax1, az1, ax2, az2, bx1, bz1, bx2, bz2) {
+    const cross = (ox, oz, ax, az, bx, bz) => (ax - ox) * (bz - oz) - (az - oz) * (bx - ox);
+    const d1 = cross(bx1, bz1, bx2, bz2, ax1, az1);
+    const d2 = cross(bx1, bz1, bx2, bz2, ax2, az2);
+    const d3 = cross(ax1, az1, ax2, az2, bx1, bz1);
+    const d4 = cross(ax1, az1, ax2, az2, bx2, bz2);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+        return true;
+    }
+    // Collinear touching cases
+    const onSeg = (px, pz, qx, qz, rx, rz) => Math.min(px, qx) <= rx &&
+        rx <= Math.max(px, qx) &&
+        Math.min(pz, qz) <= rz &&
+        rz <= Math.max(pz, qz);
+    if (d1 === 0 && onSeg(bx1, bz1, bx2, bz2, ax1, az1))
+        return true;
+    if (d2 === 0 && onSeg(bx1, bz1, bx2, bz2, ax2, az2))
+        return true;
+    if (d3 === 0 && onSeg(ax1, az1, ax2, az2, bx1, bz1))
+        return true;
+    if (d4 === 0 && onSeg(ax1, az1, ax2, az2, bx2, bz2))
+        return true;
+    return false;
+}
+/**
+ * Test if a line segment intersects any edge of a polygon.
+ */
+function segmentIntersectsPolygon(sx1, sz1, sx2, sz2, polygon) {
+    const n = polygon.length;
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        if (segmentsIntersect(sx1, sz1, sx2, sz2, polygon[i][0], polygon[i][1], polygon[j][0], polygon[j][1])) {
+            return true;
+        }
+    }
+    return false;
+}
+/**
+ * Test if an item's footprint overlaps with a polygon.
+ * Checks: any item corner inside polygon, or any polygon vertex inside item AABB, or edges intersect.
+ */
+export function itemOverlapsPolygon(position, dimensions, rotation, polygon, inset = 0) {
+    const corners = getItemFootprint(position, dimensions, rotation, inset);
+    // Check if any item corner is inside the polygon
+    for (const [cx, cz] of corners) {
+        if (pointInPolygon(cx, cz, polygon))
+            return true;
+    }
+    // Check if any polygon vertex is inside the item footprint
+    // (handles case where slab is fully inside a large item)
+    for (const [px, pz] of polygon) {
+        if (pointInPolygon(px, pz, corners))
+            return true;
+    }
+    // Check if any item edge intersects any polygon edge
+    for (let i = 0; i < 4; i++) {
+        const j = (i + 1) % 4;
+        if (segmentIntersectsPolygon(corners[i][0], corners[i][1], corners[j][0], corners[j][1], polygon))
+            return true;
+    }
+    return false;
+}
+/**
+ * Check if wall segment (a) is substantially on polygon edge segment (b).
+ * Returns true only if BOTH endpoints of the wall are on or very close to the edge.
+ * This prevents walls that just touch one point from being detected.
+ */
+function segmentsCollinearAndOverlap(ax1, az1, ax2, az2, bx1, bz1, bx2, bz2) {
+    const EPSILON = 1e-6;
+    // Cross product to check collinearity
+    const cross1 = (ax2 - ax1) * (bz1 - az1) - (az2 - az1) * (bx1 - ax1);
+    const cross2 = (ax2 - ax1) * (bz2 - az1) - (az2 - az1) * (bx2 - ax1);
+    if (Math.abs(cross1) > EPSILON || Math.abs(cross2) > EPSILON) {
+        return false; // Not collinear
+    }
+    // Check if a point is on segment b
+    const onSegment = (px, pz, qx, qz, rx, rz) => Math.min(px, qx) - EPSILON <= rx &&
+        rx <= Math.max(px, qx) + EPSILON &&
+        Math.min(pz, qz) - EPSILON <= rz &&
+        rz <= Math.max(pz, qz) + EPSILON;
+    // BOTH endpoints of wall (a) must be on edge (b) for substantial overlap
+    const a1OnB = onSegment(bx1, bz1, bx2, bz2, ax1, az1);
+    const a2OnB = onSegment(bx1, bz1, bx2, bz2, ax2, az2);
+    return a1OnB && a2OnB;
+}
+/**
+ * Test if a wall segment overlaps with a polygon.
+ * A wall is considered to overlap if:
+ * - Its midpoint is inside the polygon (wall crosses through)
+ * - At least one endpoint is inside (wall partially or fully in slab)
+ * - It's collinear with and overlaps a polygon edge (wall on slab boundary)
+ *
+ * Note: A wall with just one endpoint touching the edge but the rest outside
+ * is NOT considered overlapping (adjacent only).
+ */
+export function wallOverlapsPolygon(start, end, polygon) {
+    const dx = end[0] - start[0];
+    const dz = end[1] - start[1];
+    const len = Math.sqrt(dx * dx + dz * dz);
+    // Nudge endpoint test points a tiny step inward along the wall direction before
+    // testing containment. pointInPolygon (ray casting) produces false positives for
+    // points exactly on polygon vertices or edges — specifically the minimum-z corner
+    // of an axis-aligned polygon returns "inside" because the ray hits the opposite
+    // vertical edge exactly at its base. Nudging by 1e-6 m avoids this: a wall that
+    // merely starts at a slab corner and extends outward will have its nudged point
+    // clearly outside, while a wall that genuinely starts inside stays inside.
+    if (len > 1e-10) {
+        const step = Math.min(1e-6, len * 0.01);
+        const nx = (dx / len) * step;
+        const nz = (dz / len) * step;
+        if (pointInPolygon(start[0] + nx, start[1] + nz, polygon))
+            return true;
+        if (pointInPolygon(end[0] - nx, end[1] - nz, polygon))
+            return true;
+        // Also nudge perpendicular to the wall (into the slab interior) for walls that
+        // lie exactly on the slab boundary. The along-wall nudge keeps points on the
+        // boundary where pointInPolygon is unreliable; a perpendicular inward nudge
+        // moves the point clearly inside (or outside) the polygon.
+        // Sample the wall at 1/4, 1/2, 3/4 positions with a perpendicular nudge.
+        const PERP_STEP = 1e-4;
+        const pnx = (-nz / step) * PERP_STEP; // perpendicular left
+        const pnz = (nx / step) * PERP_STEP;
+        for (const t of [0.25, 0.5, 0.75]) {
+            const bx = start[0] + dx * t;
+            const bz = start[1] + dz * t;
+            if (pointInPolygon(bx + pnx, bz + pnz, polygon))
+                return true;
+            if (pointInPolygon(bx - pnx, bz - pnz, polygon))
+                return true;
+        }
+    }
+    // Check if midpoint is inside (catches walls crossing through)
+    const midX = (start[0] + end[0]) / 2;
+    const midZ = (start[1] + end[1]) / 2;
+    if (pointInPolygon(midX, midZ, polygon))
+        return true;
+    // Check if the wall is collinear with and overlaps any polygon edge
+    const n = polygon.length;
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const [p1x, p1z] = polygon[i];
+        const [p2x, p2z] = polygon[j];
+        if (segmentsCollinearAndOverlap(start[0], start[1], end[0], end[1], p1x, p1z, p2x, p2z)) {
+            return true;
+        }
+    }
+    return false;
+}
+export class SpatialGridManager {
+    floorGrids = new Map(); // levelId -> grid
+    wallGrids = new Map(); // levelId -> wall grid
+    walls = new Map(); // wallId -> wall data (for length calculations)
+    slabsByLevel = new Map(); // levelId -> (slabId -> slab)
+    ceilingGrids = new Map(); // ceilingId -> grid
+    ceilings = new Map(); // ceilingId -> ceiling data
+    itemCeilingMap = new Map(); // itemId -> ceilingId (reverse lookup)
+    cellSize;
+    constructor(cellSize = 0.5) {
+        this.cellSize = cellSize;
+    }
+    getFloorGrid(levelId) {
+        if (!this.floorGrids.has(levelId)) {
+            this.floorGrids.set(levelId, new SpatialGrid({ cellSize: this.cellSize }));
+        }
+        return this.floorGrids.get(levelId);
+    }
+    getWallGrid(levelId) {
+        if (!this.wallGrids.has(levelId)) {
+            this.wallGrids.set(levelId, new WallSpatialGrid());
+        }
+        return this.wallGrids.get(levelId);
+    }
+    getWallLength(wallId) {
+        const wall = this.walls.get(wallId);
+        if (!wall)
+            return 0;
+        const dx = wall.end[0] - wall.start[0];
+        const dy = wall.end[1] - wall.start[1];
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+    getWallHeight(wallId) {
+        const wall = this.walls.get(wallId);
+        return wall?.height ?? 2.5; // Default wall height
+    }
+    getCeilingGrid(ceilingId) {
+        if (!this.ceilingGrids.has(ceilingId)) {
+            this.ceilingGrids.set(ceilingId, new SpatialGrid({ cellSize: this.cellSize }));
+        }
+        return this.ceilingGrids.get(ceilingId);
+    }
+    getSlabMap(levelId) {
+        if (!this.slabsByLevel.has(levelId)) {
+            this.slabsByLevel.set(levelId, new Map());
+        }
+        return this.slabsByLevel.get(levelId);
+    }
+    // Called when nodes change
+    handleNodeCreated(node, levelId) {
+        if (node.type === 'slab') {
+            this.getSlabMap(levelId).set(node.id, node);
+        }
+        else if (node.type === 'ceiling') {
+            this.ceilings.set(node.id, node);
+        }
+        else if (node.type === 'wall') {
+            const wall = node;
+            this.walls.set(wall.id, wall);
+        }
+        else if (node.type === 'item') {
+            const item = node;
+            if (item.asset.attachTo === 'wall' || item.asset.attachTo === 'wall-side') {
+                // Wall-attached item - use parentId as the wall ID
+                const wallId = item.parentId;
+                if (wallId && this.walls.has(wallId)) {
+                    const wallLength = this.getWallLength(wallId);
+                    if (wallLength > 0) {
+                        const [width, height] = getScaledDimensions(item);
+                        const halfW = width / wallLength / 2;
+                        // Calculate t from local X position (position[0] is distance along wall)
+                        const t = item.position[0] / wallLength;
+                        // position[1] is the bottom of the item
+                        this.getWallGrid(levelId).insert({
+                            itemId: item.id,
+                            wallId,
+                            tStart: t - halfW,
+                            tEnd: t + halfW,
+                            yStart: item.position[1],
+                            yEnd: item.position[1] + height,
+                            attachType: item.asset.attachTo,
+                            side: item.side,
+                        });
+                    }
+                }
+            }
+            else if (item.asset.attachTo === 'ceiling') {
+                // Ceiling item - use parentId as the ceiling ID
+                const ceilingId = item.parentId;
+                if (ceilingId && this.ceilings.has(ceilingId)) {
+                    this.getCeilingGrid(ceilingId).insert(item.id, item.position, getScaledDimensions(item), item.rotation);
+                    this.itemCeilingMap.set(item.id, ceilingId);
+                }
+            }
+            else if (!item.asset.attachTo) {
+                // Floor item
+                this.getFloorGrid(levelId).insert(item.id, item.position, getScaledDimensions(item), item.rotation);
+            }
+        }
+    }
+    handleNodeUpdated(node, levelId) {
+        if (node.type === 'slab') {
+            this.getSlabMap(levelId).set(node.id, node);
+        }
+        else if (node.type === 'ceiling') {
+            this.ceilings.set(node.id, node);
+        }
+        else if (node.type === 'wall') {
+            const wall = node;
+            this.walls.set(wall.id, wall);
+        }
+        else if (node.type === 'item') {
+            const item = node;
+            if (item.asset.attachTo === 'wall' || item.asset.attachTo === 'wall-side') {
+                // Remove old placement and re-insert
+                this.getWallGrid(levelId).removeByItemId(item.id);
+                const wallId = item.parentId;
+                if (wallId && this.walls.has(wallId)) {
+                    const wallLength = this.getWallLength(wallId);
+                    if (wallLength > 0) {
+                        const [width, height] = getScaledDimensions(item);
+                        const halfW = width / wallLength / 2;
+                        // Calculate t from local X position (position[0] is distance along wall)
+                        const t = item.position[0] / wallLength;
+                        // position[1] is the bottom of the item
+                        this.getWallGrid(levelId).insert({
+                            itemId: item.id,
+                            wallId,
+                            tStart: t - halfW,
+                            tEnd: t + halfW,
+                            yStart: item.position[1],
+                            yEnd: item.position[1] + height,
+                            attachType: item.asset.attachTo,
+                            side: item.side,
+                        });
+                    }
+                }
+            }
+            else if (item.asset.attachTo === 'ceiling') {
+                // Remove from old ceiling grid
+                const oldCeilingId = this.itemCeilingMap.get(item.id);
+                if (oldCeilingId) {
+                    this.getCeilingGrid(oldCeilingId).remove(item.id);
+                    this.itemCeilingMap.delete(item.id);
+                }
+                // Insert into new ceiling grid
+                const ceilingId = item.parentId;
+                if (ceilingId && this.ceilings.has(ceilingId)) {
+                    this.getCeilingGrid(ceilingId).insert(item.id, item.position, getScaledDimensions(item), item.rotation);
+                    this.itemCeilingMap.set(item.id, ceilingId);
+                }
+            }
+            else if (!item.asset.attachTo) {
+                this.getFloorGrid(levelId).update(item.id, item.position, getScaledDimensions(item), item.rotation);
+            }
+        }
+    }
+    handleNodeDeleted(nodeId, nodeType, levelId) {
+        if (nodeType === 'slab') {
+            this.getSlabMap(levelId).delete(nodeId);
+        }
+        else if (nodeType === 'ceiling') {
+            this.ceilings.delete(nodeId);
+            this.ceilingGrids.delete(nodeId);
+        }
+        else if (nodeType === 'wall') {
+            this.walls.delete(nodeId);
+            // Remove all items attached to this wall from the spatial grid
+            const removedItemIds = this.getWallGrid(levelId).removeWall(nodeId);
+            return removedItemIds; // Caller can use this to delete the items from scene
+        }
+        else if (nodeType === 'item') {
+            this.getFloorGrid(levelId).remove(nodeId);
+            this.getWallGrid(levelId).removeByItemId(nodeId);
+            // Also clean up ceiling grid
+            const oldCeilingId = this.itemCeilingMap.get(nodeId);
+            if (oldCeilingId) {
+                this.getCeilingGrid(oldCeilingId).remove(nodeId);
+                this.itemCeilingMap.delete(nodeId);
+            }
+        }
+        return [];
+    }
+    // Query methods
+    canPlaceOnFloor(levelId, position, dimensions, rotation, ignoreIds) {
+        const grid = this.getFloorGrid(levelId);
+        return grid.canPlace(position, dimensions, rotation, ignoreIds);
+    }
+    /**
+     * Check if an item can be placed on a wall
+     * @param levelId - the level containing the wall
+     * @param wallId - the wall to check
+     * @param localX - X position in wall-local space (distance from wall start)
+     * @param localY - Y position (height from floor)
+     * @param dimensions - item dimensions [width, height, depth]
+     * @param attachType - 'wall' (needs both sides) or 'wall-side' (needs one side)
+     * @param side - which side for 'wall-side' items
+     * @param ignoreIds - item IDs to ignore in collision check
+     */
+    canPlaceOnWall(levelId, wallId, localX, localY, dimensions, attachType = 'wall', side, ignoreIds) {
+        const wallLength = this.getWallLength(wallId);
+        if (wallLength === 0) {
+            return { valid: false, conflictIds: [] };
+        }
+        const wallHeight = this.getWallHeight(wallId);
+        // Convert local X position to parametric t (0-1)
+        const tCenter = localX / wallLength;
+        const [itemWidth, itemHeight] = dimensions;
+        return this.getWallGrid(levelId).canPlaceOnWall(wallId, wallLength, wallHeight, tCenter, itemWidth, localY, itemHeight, attachType, side, ignoreIds);
+    }
+    getWallForItem(levelId, itemId) {
+        return this.getWallGrid(levelId).getWallForItem(itemId);
+    }
+    /**
+     * Get the total slab elevation at a given (x, z) position on a level.
+     * Returns the highest slab elevation if the point is inside any slab polygon (but not in any holes), otherwise 0.
+     */
+    getSlabElevationAt(levelId, x, z) {
+        const slabMap = this.slabsByLevel.get(levelId);
+        if (!slabMap)
+            return 0;
+        let maxElevation = 0;
+        for (const slab of slabMap.values()) {
+            if (slab.polygon.length >= 3 && pointInPolygon(x, z, slab.polygon)) {
+                // Check if point is in any hole
+                let inHole = false;
+                const holes = slab.holes || [];
+                for (const hole of holes) {
+                    if (hole.length >= 3 && pointInPolygon(x, z, hole)) {
+                        inHole = true;
+                        break;
+                    }
+                }
+                if (!inHole) {
+                    const elevation = slab.elevation ?? 0.05;
+                    if (elevation > maxElevation) {
+                        maxElevation = elevation;
+                    }
+                }
+            }
+        }
+        return maxElevation;
+    }
+    /**
+     * Get the slab elevation for an item using its full footprint (bounding box).
+     * Checks if any part of the item's rotated footprint overlaps with any slab polygon (excluding holes).
+     * Returns the highest overlapping slab elevation, or 0 if none.
+     */
+    getSlabElevationForItem(levelId, position, dimensions, rotation) {
+        const slabMap = this.slabsByLevel.get(levelId);
+        if (!slabMap)
+            return 0;
+        let maxElevation = Number.NEGATIVE_INFINITY;
+        for (const slab of slabMap.values()) {
+            if (slab.polygon.length >= 3 &&
+                itemOverlapsPolygon(position, dimensions, rotation, slab.polygon, 0.01)) {
+                // Check if item is entirely within a hole (if so, ignore this slab)
+                // We consider it entirely in a hole if the item center is in the hole
+                let inHole = false;
+                const [cx, , cz] = position;
+                const holes = slab.holes || [];
+                for (const hole of holes) {
+                    if (hole.length >= 3 && pointInPolygon(cx, cz, hole)) {
+                        inHole = true;
+                        break;
+                    }
+                }
+                if (!inHole) {
+                    const elevation = slab.elevation ?? 0.05;
+                    if (elevation > maxElevation) {
+                        maxElevation = elevation;
+                    }
+                }
+            }
+        }
+        return maxElevation === Number.NEGATIVE_INFINITY ? 0 : maxElevation;
+    }
+    /**
+     * Get the slab elevation for a wall by checking if it overlaps with any slab polygon (excluding holes).
+     * Uses wallOverlapsPolygon which handles edge cases (points on boundary, collinear segments).
+     * Returns the highest slab elevation found, or 0 if none.
+     */
+    getSlabElevationForWall(levelId, start, end) {
+        const slabMap = this.slabsByLevel.get(levelId);
+        if (!slabMap)
+            return 0;
+        let maxElevation = Number.NEGATIVE_INFINITY;
+        for (const slab of slabMap.values()) {
+            if (slab.polygon.length < 3)
+                continue;
+            if (!wallOverlapsPolygon(start, end, slab.polygon))
+                continue;
+            const holes = slab.holes || [];
+            if (holes.length === 0) {
+                // No holes: wall is on this slab
+                const elevation = slab.elevation ?? 0.05;
+                if (elevation > maxElevation)
+                    maxElevation = elevation;
+                continue;
+            }
+            // Sample multiple points along the wall to check whether any portion lies on
+            // solid slab (not inside any hole). Checking only the midpoint fails when the
+            // midpoint falls in a staircase hole but the wall's endpoints are on solid slab.
+            const dx = end[0] - start[0];
+            const dz = end[1] - start[1];
+            let hasValidPoint = false;
+            for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+                const px = start[0] + dx * t;
+                const pz = start[1] + dz * t;
+                let inHole = false;
+                for (const hole of holes) {
+                    if (hole.length >= 3 && pointInPolygon(px, pz, hole)) {
+                        inHole = true;
+                        break;
+                    }
+                }
+                if (!inHole) {
+                    hasValidPoint = true;
+                    break;
+                }
+            }
+            if (hasValidPoint) {
+                const elevation = slab.elevation ?? 0.05;
+                if (elevation > maxElevation)
+                    maxElevation = elevation;
+            }
+        }
+        return maxElevation === Number.NEGATIVE_INFINITY ? 0 : maxElevation;
+    }
+    /**
+     * Check if an item can be placed on a ceiling.
+     * Validates that the footprint is within the ceiling polygon (but not in any holes) and doesn't overlap other ceiling items.
+     */
+    canPlaceOnCeiling(ceilingId, position, dimensions, rotation, ignoreIds) {
+        const ceiling = this.ceilings.get(ceilingId);
+        if (!ceiling || ceiling.polygon.length < 3) {
+            return { valid: false, conflictIds: [] };
+        }
+        // Check that the item footprint is entirely within the ceiling polygon
+        const corners = getItemFootprint(position, dimensions, rotation);
+        for (const [cx, cz] of corners) {
+            if (!pointInPolygon(cx, cz, ceiling.polygon)) {
+                return { valid: false, conflictIds: [] };
+            }
+        }
+        // Check if item center is in any hole (if so, it cannot be placed)
+        const [centerX, , centerZ] = position;
+        const holes = ceiling.holes || [];
+        for (const hole of holes) {
+            if (hole.length >= 3 && pointInPolygon(centerX, centerZ, hole)) {
+                return { valid: false, conflictIds: [] };
+            }
+        }
+        // Check for overlaps with other ceiling items
+        return this.getCeilingGrid(ceilingId).canPlace(position, dimensions, rotation, ignoreIds);
+    }
+    clearLevel(levelId) {
+        this.floorGrids.delete(levelId);
+        this.wallGrids.delete(levelId);
+        this.slabsByLevel.delete(levelId);
+    }
+    clear() {
+        this.floorGrids.clear();
+        this.wallGrids.clear();
+        this.walls.clear();
+        this.slabsByLevel.clear();
+        this.ceilingGrids.clear();
+        this.ceilings.clear();
+        this.itemCeilingMap.clear();
+    }
+}
+// Singleton instance
+export const spatialGridManager = new SpatialGridManager();
