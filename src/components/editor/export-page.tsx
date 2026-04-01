@@ -1,228 +1,238 @@
 'use client'
 
-import { useState, useRef } from 'react'
-import { Printer, X, RotateCcw, RotateCw, Type, Trash2 } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Download, X, Type, MousePointer2 } from 'lucide-react'
 import { FloorplanPanel } from './floorplan-panel'
+import { useScene, ItemNode, AnyNodeId } from '@pascal-app/core'
+import { useViewer } from '@pascal-app/viewer'
+import useEditor from '../../store/use-editor'
+import { sfxEmitter } from '../../lib/sfx-bus'
 
-// --- 1. UPGRADED: Multiline & Customizable Paper-Space Text ---
-function DraggableLabel({ text, x, y, fontSize = 24, color = '#000000', onUpdate, onRemove }: any) {
-  const [pos, setPos] = useState({ x, y })
-  const dragRef = useRef<{ startX: number; startY: number; initX: number; initY: number } | null>(null)
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Prevent dragging if the user is clicking the text box or the toolbar inputs!
-    if (['TEXTAREA', 'INPUT', 'BUTTON'].includes((e.target as HTMLElement).tagName)) return;
-    
-    e.currentTarget.setPointerCapture(e.pointerId)
-    dragRef.current = { startX: e.clientX, startY: e.clientY, initX: pos.x, initY: pos.y }
-  }
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragRef.current) return
-    const dx = e.clientX - dragRef.current.startX
-    const dy = e.clientY - dragRef.current.startY
-    setPos({ x: dragRef.current.initX + dx, y: dragRef.current.initY + dy })
-  }
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (dragRef.current) {
-      onUpdate({ x: pos.x, y: pos.y })
-      dragRef.current = null
-      e.currentTarget.releasePointerCapture(e.pointerId)
-    }
-  }
-
-  // Calculate how many rows the textarea needs based on line breaks
-  const lineCount = text.split('\n').length || 1
-
-  return (
-    <div
-      className="absolute z-[60] flex flex-col group"
-      style={{ left: pos.x, top: pos.y }}
-    >
-      {/* The Floating Toolbar (Visible only on hover, Hidden on Print) */}
-      <div className="absolute -top-10 left-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[#1c1c1e] p-1.5 rounded shadow-lg border border-border/50 print:hidden z-50">
-        <input 
-          type="color" 
-          value={color} 
-          onChange={e => onUpdate({ color: e.target.value })} 
-          className="h-6 w-6 cursor-pointer rounded bg-transparent border-none p-0"
-          title="Text Color"
-        />
-        <input 
-          type="number" 
-          value={fontSize} 
-          onChange={e => onUpdate({ fontSize: Number(e.target.value) })} 
-          className="h-6 w-12 bg-black/40 text-white text-xs text-center border border-border/50 rounded outline-none"
-          min="8" max="120"
-          title="Font Size"
-        />
-        <button onClick={onRemove} className="text-red-400 hover:text-red-300 hover:bg-red-500/20 p-1 rounded transition-colors" title="Delete">
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
-      </div>
-
-      {/* The Draggable Wrapper & Multiline Input */}
-      <div 
-        className="cursor-move p-1 border border-transparent hover:border-blue-500/30 rounded transition-colors"
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-      >
-        <textarea
-          value={text}
-          onChange={(e) => onUpdate({ text: e.target.value })}
-          rows={lineCount}
-          className="bg-transparent font-bold outline-none placeholder:text-black/30 resize-none overflow-hidden whitespace-pre-wrap leading-tight"
-          style={{ fontSize: `${fontSize}px`, color: color }}
-          placeholder="Room Name"
-        />
-      </div>
-    </div>
-  )
+interface ExportPageProps {
+  onClose: () => void
 }
 
-// --- 2. Main Export Page ---
-interface ExportPageProps { onClose: () => void }
-
 export function ExportPage({ onClose }: ExportPageProps) {
-  const [rotation, setRotation] = useState(0)
-  const [company, setCompany] = useState('MY CAD COMPANY')
-  const [client, setClient] = useState('Client Name\nProject Location')
-  const [notes, setNotes] = useState('Annotations & Notes go here.')
+  const setMode = useEditor((s) => s.setMode)
+  const [activeTool, setActiveTool] = useState<'pan' | 'text'>('pan')
   
-  // State to hold our floating room labels
-  const [labels, setLabels] = useState<{ id: string; text: string; x: number; y: number; fontSize?: number; color?: string }[]>([])
+  const nodes = useScene((s) => s.nodes)
+  const textNodes = Object.values(nodes).filter(n => n.type === 'item' && n.metadata?.isText)
 
-  const addLabel = () => {
-    setLabels([...labels, { 
-      id: crypto.randomUUID(), 
-      text: 'New Room\n100 sqft', // Multiline example
-      x: 200, y: 200, 
-      fontSize: 24, color: '#000000' 
-    }])
+  const [company, setCompany] = useState('MY CAD COMPANY')
+  const [client, setClient] = useState('Client Name - Project Details')
+
+  const syncGroupRef = useRef<SVGGElement>(null)
+  const [cameraMatrix, setCameraMatrix] = useState({ x: 0, y: 0, scale: 1 })
+
+  // 1. Enter strict export mode to prevent accidental wall drawing
+  useEffect(() => {
+    setMode('export')
+    return () => setMode('select')
+  }, [setMode])
+
+  // 2. Safely find the Main CAD Canvas (Ignore tiny UI icons like Chevrons!)
+  const getMainSvg = () => {
+    const svgs = Array.from(document.querySelectorAll('.cad-viewport svg'))
+    return svgs.reduce((largest: any, svg: any) => {
+      const width = svg.getBoundingClientRect().width
+      return width > (largest?.getBoundingClientRect().width || 0) ? svg : largest
+    }, svgs[0]) as SVGSVGElement
   }
 
-  const updateLabel = (id: string, updates: any) => {
-    setLabels(labels.map(lbl => lbl.id === id ? { ...lbl, ...updates } : lbl))
+  // 3. Synchronize our Text Layer with Pascal's Camera
+  useEffect(() => {
+    let frameId: number
+    const syncCamera = () => {
+      const mainSvg = getMainSvg()
+      const masterGroup = mainSvg?.querySelector('g') as SVGGElement
+      
+      if (masterGroup && syncGroupRef.current) {
+        // Copy the visual transform
+        syncGroupRef.current.setAttribute('transform', masterGroup.getAttribute('transform') || '')
+        
+        // Extract exact math values for our text placement tool
+        const ctm = masterGroup.getCTM()
+        if (ctm) {
+          setCameraMatrix({ x: ctm.e, y: ctm.f, scale: ctm.a })
+        }
+      }
+      frameId = requestAnimationFrame(syncCamera)
+    }
+    syncCamera()
+    return () => cancelAnimationFrame(frameId)
+  }, [])
+
+  // 4. Bulletproof Text Placement
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    if (activeTool !== 'text') return
+
+    const rect = e.currentTarget.getBoundingClientRect()
+    const screenX = e.clientX - rect.left
+    const screenY = e.clientY - rect.top
+
+    // Reverse Engineer the Camera Transform Math!
+    const unpannedX = screenX - cameraMatrix.x
+    const unpannedY = screenY - cameraMatrix.y
+    const unscaledX = unpannedX / cameraMatrix.scale
+    const unscaledY = unpannedY / cameraMatrix.scale
+    
+    // Convert to CAD Meters (Pascal uses 50px = 1m)
+    const cadX = unscaledX / 50
+    const cadZ = -unscaledY / 50
+
+    const levelId = useViewer.getState().selection.levelId
+    if (!levelId) return
+
+    const node = ItemNode.parse({
+      id: crypto.randomUUID(),
+      type: 'item',
+      position: [cadX, 0, cadZ],
+      rotation: [0, 0, 0],
+      width: 0.5, depth: 0.2, height: 0.1,
+      parentId: levelId,
+      name: 'Annotation',
+      metadata: { isText: true, text: 'New Room', fontSize: 24, color: '#000000' },
+    })
+
+    useScene.getState().createNode(node, levelId as AnyNodeId)
+    sfxEmitter.emit('sfx:item-place')
+    setActiveTool('pan') // Switch back to pan tool automatically
+  }
+
+  // 5. The True Vector Exporter
+  const handleVectorExport = () => {
+    const mainSvg = getMainSvg()
+    if (!mainSvg) return
+
+    const clonedSvg = mainSvg.cloneNode(true) as SVGSVGElement
+
+    // Inject our Text Layer into the cloned file
+    if (syncGroupRef.current) {
+      const textLayer = syncGroupRef.current.cloneNode(true)
+      clonedSvg.appendChild(textLayer)
+    }
+
+    // Measure the screen to anchor the Title Block
+    const width = mainSvg.getBoundingClientRect().width
+    const height = mainSvg.getBoundingClientRect().height
+    clonedSvg.setAttribute('viewBox', `0 0 ${width} ${height}`)
+
+    const titleBlock = document.createElementNS('http://www.w3.org/2000/svg', 'g')
+    titleBlock.setAttribute('transform', `translate(${width - 320}, ${height - 120})`)
+    titleBlock.innerHTML = `
+      <rect width="300" height="100" fill="#ffffff" stroke="#000000" stroke-width="2"/>
+      <line x1="0" y1="30" x2="300" y2="30" stroke="#000000" stroke-width="2"/>
+      <text x="150" y="20" font-family="sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="#000">${company}</text>
+      <text x="10" y="50" font-family="sans-serif" font-size="10" font-weight="bold" fill="#666">CLIENT DETAILS</text>
+      <text x="10" y="70" font-family="sans-serif" font-size="12" fill="#000">${client}</text>
+    `
+    clonedSvg.appendChild(titleBlock)
+
+    // Clean out Pascal UI artifacts
+    const serializer = new XMLSerializer()
+    let svgString = serializer.serializeToString(clonedSvg)
+    svgString = svgString.replace(/<circle[^>]*>/g, '') 
+
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `Floorplan_Export_${new Date().getTime()}.svg`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const updateTextNode = (id: string, newText: string) => {
+    useScene.getState().updateNode(id as AnyNodeId, { 
+      metadata: { ...nodes[id as AnyNodeId].metadata, text: newText } 
+    })
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex h-screen w-screen bg-neutral-200 font-sans text-foreground">
+    <div className="fixed inset-0 z-[100] flex h-screen w-screen bg-[#121212] font-sans text-foreground">
       
-      {/* --- LEFT SIDEBAR --- */}
-      <div className="w-80 flex-shrink-0 overflow-y-auto border-r border-border/50 bg-[#1c1c1e] p-6 shadow-xl flex flex-col gap-6 print:hidden custom-scrollbar">
+      {/* LEFT SIDEBAR CONTROLS */}
+      <div className="w-80 flex-shrink-0 border-r border-border/50 bg-[#1c1c1e] p-6 shadow-xl flex flex-col gap-6">
         <div className="flex items-center justify-between border-b border-border/20 pb-4">
-          <h2 className="text-lg font-bold text-white">Export Layout</h2>
-          <button onClick={onClose} className="rounded-md p-1 hover:bg-white/10 text-white">
-            <X className="h-5 w-5" />
-          </button>
+          <h2 className="text-lg font-bold text-white">CAD Exporter</h2>
+          <button onClick={onClose} className="rounded-md p-1 hover:bg-white/10 text-white"><X className="h-5 w-5" /></button>
         </div>
 
-        {/* Viewport Controls */}
         <div className="space-y-3">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Adjust Viewport</h3>
-          <p className="text-xs text-white/60 text-yellow-400 font-medium">
-            ⚠️ Rule: Frame and zoom your drawing perfectly BEFORE adding room names!
-          </p>
+          <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Model Space Tools</h3>
           <div className="flex gap-2">
-            <button onClick={() => setRotation(r => r - 90)} className="flex flex-1 items-center justify-center gap-2 rounded bg-white/10 py-2 text-xs text-white hover:bg-white/20">
-              <RotateCcw className="h-4 w-4" /> -90°
+            <button onClick={() => setActiveTool('pan')} className={`flex flex-1 items-center justify-center gap-2 rounded py-2 text-xs font-bold transition-colors ${activeTool === 'pan' ? 'bg-blue-600 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+              <MousePointer2 className="h-4 w-4" /> Pan / Frame
             </button>
-            <button onClick={() => setRotation(r => r + 90)} className="flex flex-1 items-center justify-center gap-2 rounded bg-white/10 py-2 text-xs text-white hover:bg-white/20">
-              <RotateCw className="h-4 w-4" /> +90°
+            <button onClick={() => setActiveTool('text')} className={`flex flex-1 items-center justify-center gap-2 rounded py-2 text-xs font-bold transition-colors ${activeTool === 'text' ? 'bg-blue-600 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}>
+              <Type className="h-4 w-4" /> Add Text
             </button>
           </div>
+          {activeTool === 'text' && <p className="text-[10px] text-blue-400">Click anywhere on the canvas to place text.</p>}
         </div>
 
-        {/* Paper-Space Annotations Tool */}
-        <div className="space-y-3 pt-4 border-t border-border/20">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Paper Space</h3>
-          <button onClick={addLabel} className="flex w-full items-center justify-center gap-2 rounded border border-white/20 bg-transparent py-2 text-sm text-white hover:bg-white/10 transition-colors">
-            <Type className="h-4 w-4" /> Add Room Name
-          </button>
-        </div>
-
-        {/* Title Block Form */}
         <div className="space-y-4 pt-4 border-t border-border/20">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Title Block</h3>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[10px] uppercase text-white/70">Company</span>
-            <input value={company} onChange={e => setCompany(e.target.value)} className="rounded border border-border/50 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-500" />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[10px] uppercase text-white/70">Client</span>
-            <textarea value={client} onChange={e => setClient(e.target.value)} rows={2} className="resize-none rounded border border-border/50 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-500" />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[10px] uppercase text-white/70">Notes</span>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={4} className="resize-none rounded border border-border/50 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-500" />
-          </label>
+          <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Vector Title Block</h3>
+          <label className="flex flex-col gap-1.5"><span className="text-[10px] uppercase text-white/70">Company</span><input value={company} onChange={e => setCompany(e.target.value)} className="rounded border border-border/50 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-500" /></label>
+          <label className="flex flex-col gap-1.5"><span className="text-[10px] uppercase text-white/70">Client</span><input value={client} onChange={e => setClient(e.target.value)} className="rounded border border-border/50 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-500" /></label>
         </div>
 
         <div className="mt-auto pt-6">
-          <button onClick={() => window.print()} className="flex w-full items-center justify-center gap-2 rounded bg-blue-600 py-3 font-bold text-white shadow-lg hover:bg-blue-700">
-            <Printer className="h-5 w-5" /> Print / Export PDF
+          <button onClick={handleVectorExport} className="flex w-full items-center justify-center gap-2 rounded bg-green-600 py-3 font-bold text-white shadow-lg hover:bg-green-700">
+            <Download className="h-5 w-5" /> Download Vector CAD (.svg)
           </button>
         </div>
       </div>
 
-      {/* --- RIGHT WORKSPACE --- */}
-      <div className="flex flex-1 items-center justify-center overflow-auto bg-neutral-300 p-8 print:p-0 print:bg-white">
+      {/* RIGHT WORKSPACE: LIVE CAD PREVIEW */}
+      <div className="relative flex flex-1 items-center justify-center overflow-hidden bg-white">
         
-        <div className="print-area relative h-[210mm] w-[297mm] overflow-hidden border border-gray-400 bg-white shadow-2xl print:shadow-none print:border-none">
-          
-          {/* CAD Viewport */}
-          <div 
-            className="cad-viewport absolute inset-0 origin-center transition-transform duration-300"
-            style={{ transform: `rotate(${rotation}deg)` }}
-          >
+        {/* The Click Interceptor Wrapper */}
+        <div 
+          className={`cad-viewport absolute inset-0 ${activeTool === 'text' ? 'cursor-crosshair' : 'cursor-default'}`}
+          onClick={handleCanvasClick}
+        >
+          {/* We turn off internal pointer events ONLY when adding text, so you can still right-click pan! */}
+          <div className={`w-full h-full ${activeTool === 'text' ? 'pointer-events-none' : 'pointer-events-auto'}`}>
             <FloorplanPanel />
           </div>
-
-          {/* Render Labels */}
-          {labels.map(lbl => (
-            <DraggableLabel 
-              key={lbl.id} 
-              {...lbl} 
-              onUpdate={(updates: any) => updateLabel(lbl.id, updates)} 
-              onRemove={() => setLabels(labels.filter(l => l.id !== lbl.id))}
-            />
-          ))}
-
-          {/* Title Block Template */}
-          <div className="pointer-events-none absolute bottom-4 right-4 z-[70] w-72 border-2 border-black bg-white text-black">
-            <div className="border-b-2 border-black bg-gray-100 p-3 text-center">
-              <h1 className="text-base font-black uppercase tracking-widest">{company}</h1>
-            </div>
-            <div className="border-b-2 border-black p-3">
-              <h2 className="mb-1 text-[9px] font-bold uppercase tracking-widest text-gray-500">Client Details</h2>
-              <p className="whitespace-pre-wrap text-xs font-semibold">{client}</p>
-            </div>
-            <div className="min-h-[80px] p-3">
-              <h2 className="mb-1 text-[9px] font-bold uppercase tracking-widest text-gray-500">Annotations</h2>
-              <p className="whitespace-pre-wrap text-xs">{notes}</p>
-            </div>
-          </div>
-
         </div>
+
+        {/* Custom Native SVG Overlay */}
+        <svg className="pointer-events-none absolute inset-0 h-full w-full">
+          <g ref={syncGroupRef}>
+            {textNodes.map((node: any) => {
+              const scale = 50 
+              const cx = node.position[0] * scale
+              const cy = -(node.position[2] * scale)
+              
+              return (
+                <foreignObject key={node.id} x={cx - 100} y={cy - 20} width="200" height="100" className="pointer-events-auto">
+                  <input
+                    type="text"
+                    value={node.metadata.text}
+                    onChange={(e) => updateTextNode(node.id, e.target.value)}
+                    className="w-full bg-transparent text-center font-bold outline-none border border-transparent hover:border-blue-400 focus:border-blue-500 rounded text-black transition-colors"
+                    style={{ fontSize: `${node.metadata.fontSize}px`, color: node.metadata.color }}
+                  />
+                </foreignObject>
+              )
+            })}
+          </g>
+        </svg>
+
       </div>
 
+      {/* Hide the UI junk from the Live Preview SAFELY */}
       <style dangerouslySetInnerHTML={{__html: `
-        .cad-viewport > div > div:first-child { display: none !important; }
-        .cad-viewport svg circle { visibility: hidden !important; }
-        .cad-viewport .bg-grid-pattern, .cad-viewport .bg-background { background: transparent !important; }
-
-        @media print {
-          body * { visibility: hidden; }
-          .print-area, .print-area * { visibility: visible; }
-          .print-area { 
-            position: absolute !important; left: 0 !important; top: 0 !important; margin: 0 !important; box-shadow: none !important;
-          }
-          .print-area textarea, .print-area input {
-            border: none !important; background: transparent !important; resize: none !important;
-          }
-          @page { size: A4 landscape; margin: 0; }
+        .cad-viewport .bg-background\\/92,
+        .cad-viewport .border-b.flex.items-center { 
+          display: none !important; 
+        }
+        .cad-viewport .bg-grid-pattern { 
+          background: transparent !important; 
         }
       `}} />
     </div>
