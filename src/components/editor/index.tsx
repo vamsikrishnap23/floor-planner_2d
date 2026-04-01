@@ -1,5 +1,6 @@
 'use client'
-
+import { ExportPage } from './export-page'
+import { Printer } from 'lucide-react'
 import { initSpaceDetectionSync, initSpatialGridSync, useScene } from '@pascal-app/core'
 import { type ReactNode, useEffect, useState } from 'react'
 import { type PresetsAdapter, PresetsProvider } from '../../contexts/presets-context'
@@ -24,7 +25,8 @@ import { FloorplanPanel } from './floorplan-panel'
 import { OpeningTool2D } from '../tools/opening-tool-2d'
 import { SelectionTool2D } from '../tools/selection-tool-2d'
 import { ItemTool2D } from '../tools/item-tool-2d'
-import { TextTool2D } from '../tools/text-tool-2d'
+import { TextRenderer2D } from './text-renderer-2d'
+import { ExportManager } from './export-manager'
 import { MoveOpeningTool2D } from '../tools/move-opening-tool-2d'
 let hasInitializedEditorRuntime = false
 
@@ -76,7 +78,7 @@ export default function Editor({
   isLoading = false, settingsPanelProps, sitePanelProps, presetsAdapter,
 }: EditorProps) {
   useKeyboard()
-
+  const [showExportPage, setShowExportPage] = useState(false)
   const { isLoadingSceneRef } = useAutoSave({ onSave, onDirty, onSaveStatusChange, isVersionPreviewMode })
   const [isSceneLoading, setIsSceneLoading] = useState(false)
 
@@ -115,6 +117,12 @@ export default function Editor({
           <>
             <ActionMenu />
             <PanelManager />
+            <button 
+              onClick={() => setShowExportPage(true)}
+              className="fixed right-4 top-4 z-40 flex items-center gap-2 rounded-lg border border-border/50 bg-[#2C2C2E] px-4 py-2 text-sm font-medium text-white shadow-md transition-colors hover:bg-[#3e3e3e]"
+            >
+              <Printer className="h-4 w-4" /> Go to Export Page
+            </button>
             <SidebarProvider className="fixed z-20">
               <AppSidebar
                 appMenuButton={appMenuButton}
@@ -136,9 +144,11 @@ export default function Editor({
             <SelectionTool2D />
             <MoveOpeningTool2D />
             <ItemTool2D />
-            <TextTool2D />
+            <TextRenderer2D />
           </main>
         </ErrorBoundary>
+
+        {showExportPage && <ExportPage onClose={() => setShowExportPage(false)} />}   
       </div>
     </PresetsProvider>
   )

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { AnyNodeId, ItemNode, emitter, useScene } from '@pascal-app/core'
 import { useViewer } from '@pascal-app/viewer'
 import useEditor from '../../store/use-editor'
@@ -11,25 +11,82 @@ export function TextTool2D() {
   const mode = useEditor((s) => s.mode)
   const setTool = useEditor((s) => s.setTool)
   const setMode = useEditor((s) => s.setMode)
+  
+  const draftRef = useRef<any>(null)
 
   useEffect(() => {
-    // Tool is now guaranteed to activate!
-    if (mode !== 'build' || tool !== 'text') return
+    if (mode !== 'build' || tool !== 'text') {
+      if (draftRef.current) {
+        useScene.getState().deleteNode(draftRef.current.id)
+        draftRef.current = null
+      }
+      return
+    }
 
-    const onClick = (event: any) => {
-      const levelId = useViewer.getState().selection.levelId
+    const getLevelId = () => useViewer.getState().selection.levelId
+
+    const destroyDraft = () => {
+      if (!draftRef.current) return
+      useScene.getState().deleteNode(draftRef.current.id)
+      draftRef.current = null
+    }
+
+    const onPointerMove = (event: any) => {
+      const levelId = getLevelId()
       if (!levelId) return
 
       const pos = event.position || event.point || [0, 0, 0]
 
+      if (!draftRef.current) {
+        try {
+          const node = ItemNode.parse({
+            id: crypto.randomUUID(),
+            type: 'item',
+            position: pos,
+            rotation: [0, 0, 0],
+            // 1. INCREASED SIZE: Make the bounding box visible!
+            width: 0.5,
+            depth: 0.2,
+            height: 0.1,
+            parentId: levelId,
+            name: 'Annotation',
+            metadata: { 
+              isTransient: true, 
+              isText: true, 
+              text: 'New Text', 
+              fontSize: 16, 
+              color: '#171717' 
+            },
+          })
+          useScene.getState().createNode(node, levelId as AnyNodeId)
+          draftRef.current = node
+        } catch (error) {
+          console.error("Draft generation failed", error)
+        }
+      } else {
+        useScene.getState().updateNode(draftRef.current.id, { position: pos })
+      }
+    }
+
+    const onClick = (event: any) => {
+      if (!draftRef.current) return
+
+      const draft = draftRef.current
+      draftRef.current = null
+      useScene.getState().deleteNode(draft.id) 
+
+      const levelId = getLevelId()
+      const pos = event.position || event.point || draft.position
+
       try {
+        // 2. FRESH PARSE: Generate a clean permanent node
         const node = ItemNode.parse({
           id: crypto.randomUUID(),
           type: 'item',
           position: pos,
           rotation: [0, 0, 0],
-          width: 0.1,
-          depth: 0.1,
+          width: 0.5,
+          depth: 0.2,
           height: 0.1,
           parentId: levelId,
           name: 'Annotation',
@@ -38,28 +95,37 @@ export function TextTool2D() {
             text: 'New Text', 
             fontSize: 16, 
             color: '#171717' 
-          },
+          }, 
         })
 
         useScene.getState().createNode(node, levelId as AnyNodeId)
-        useViewer.getState().setSelection({ selectedIds: [node.id] })
         sfxEmitter.emit('sfx:item-place')
         
-        // Auto-revert back to Select Mode so you can type your text immediately!
-        setTool('select')
-        setMode('select')
+        // 3. DEFER STATE CHANGES: Wait 50ms so the Selection Tool ignores this click!
+        setTimeout(() => {
+          useViewer.getState().setSelection({ selectedIds: [node.id] })
+          setTool('select')
+          setMode('select')
+        }, 50)
+
       } catch (error) {
         console.error("Text Placement Failed:", error)
       }
     }
 
-    // Listen to BOTH the floor and the walls
+    emitter.on('grid:move', onPointerMove)
+    emitter.on('wall:move', onPointerMove)
     emitter.on('grid:click', onClick)
     emitter.on('wall:click', onClick)
+    emitter.on('tool:cancel', destroyDraft)
     
     return () => {
+      destroyDraft()
+      emitter.off('grid:move', onPointerMove)
+      emitter.off('wall:move', onPointerMove)
       emitter.off('grid:click', onClick)
       emitter.off('wall:click', onClick)
+      emitter.off('tool:cancel', destroyDraft)
     }
   }, [tool, mode, setTool, setMode])
 
